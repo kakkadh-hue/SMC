@@ -104,7 +104,23 @@ def download_ticker_data(ticker: str, start_date: dt.date, end_date: dt.date) ->
         return data
     data = data.reset_index()
     data = data.rename(columns={"Adj Close": "Adj Close"})
-    data = data[["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"]]
+    data["Deliverable Volume"] = pd.NA
+    data["Deliverable %"] = pd.NA
+    data["OI"] = pd.NA
+    data = data[
+        [
+            "Date",
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Adj Close",
+            "Volume",
+            "Deliverable Volume",
+            "Deliverable %",
+            "OI",
+        ]
+    ]
     return data
 
 
