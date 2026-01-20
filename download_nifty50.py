@@ -90,7 +90,61 @@ def fetch_nifty50_tickers() -> Tuple[List[str], str]:
         return hardcoded, "hardcoded"
 
 
-def download_ticker_data(ticker: str, start_date: dt.date, end_date: dt.date) -> pd.DataFrame:
+def build_nse_session() -> requests.Session:
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nseindia.com/",
+            "Connection": "keep-alive",
+        }
+    )
+    session.get("https://www.nseindia.com", timeout=20)
+    return session
+
+
+def fetch_nse_delivery_data(
+    session: requests.Session, ticker: str, start_date: pd.Timestamp, end_date: pd.Timestamp
+) -> pd.DataFrame:
+    symbol = ticker.replace(".NS", "")
+    url = "https://www.nseindia.com/api/historical/cm/equity"
+    params = {
+        "symbol": symbol,
+        "series": "[\"EQ\"]",
+        "from": start_date.strftime("%d-%m-%Y"),
+        "to": end_date.strftime("%d-%m-%Y"),
+    }
+    response = session.get(url, params=params, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    records = payload.get("data", [])
+    if not records:
+        return pd.DataFrame()
+    frame = pd.DataFrame(records)
+    frame["Date"] = pd.to_datetime(frame["CH_TIMESTAMP"], format="%d-%b-%Y")
+    frame = frame.rename(
+        columns={
+            "CH_DELIVERY_QTY": "Deliverable Volume",
+            "CH_DELIVERY_PERC": "Deliverable %",
+            "CH_OPEN_INT": "OI",
+        }
+    )
+    frame = frame[["Date", "Deliverable Volume", "Deliverable %", "OI"]]
+    return frame
+
+
+def download_ticker_data(
+    ticker: str,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    nse_session: requests.Session,
+) -> pd.DataFrame:
     data = yf.download(
         ticker,
         start=start_date,
@@ -104,9 +158,20 @@ def download_ticker_data(ticker: str, start_date: dt.date, end_date: dt.date) ->
         return data
     data = data.reset_index()
     data = data.rename(columns={"Adj Close": "Adj Close"})
-    data["Deliverable Volume"] = pd.NA
-    data["Deliverable %"] = pd.NA
-    data["OI"] = pd.NA
+    try:
+        nse_data = fetch_nse_delivery_data(nse_session, ticker, start_date, end_date)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Failed to fetch NSE delivery data for {ticker}: {exc}")
+        nse_data = pd.DataFrame()
+    if nse_data.empty:
+        data["Deliverable Volume"] = pd.NA
+        data["Deliverable %"] = pd.NA
+        data["OI"] = pd.NA
+    else:
+        data = data.merge(nse_data, on="Date", how="left")
+        data["Deliverable Volume"] = data["Deliverable Volume"].astype("Int64")
+        data["Deliverable %"] = data["Deliverable %"].astype("Float64")
+        data["OI"] = data["OI"].astype("Int64")
     data = data[
         [
             "Date",
@@ -133,11 +198,12 @@ def main() -> None:
     start_date = end_date - pd.DateOffset(years=5)
     success = 0
     failed = []
+    nse_session = build_nse_session()
 
     for ticker in tickers:
         print(f"Downloading {ticker}...")
         try:
-            data = download_ticker_data(ticker, start_date, end_date)
+            data = download_ticker_data(ticker, start_date, end_date, nse_session)
             if data.empty:
                 print(f"No data for {ticker}; skipping.")
                 failed.append(ticker)
